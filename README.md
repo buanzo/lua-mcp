@@ -1,82 +1,156 @@
-# Lua
+# liblua-mcp
 
-## Buanzo fork note
+Relink, don't patch: `liblua-mcp` explores whether embedded Lua hosts can
+expose local MCP observability and controlled agentic interfaces by linking
+against an MCP-aware `liblua`.
 
-This branch prototypes `liblua-mcp`: an experimental Lua 5.4.8 runtime
-extension that lets embedded Lua hosts start a local MCP endpoint from Lua
-code. The goal is to let applications such as Nmap NSE gain agentic control
-surfaces by relinking against this Lua runtime, without patching each host
-application.
+This is an experimental Lua 5.4.8 fork. The first proof target is Nmap NSE:
+rebuild Nmap against this runtime, run the `mcp-listen.nse` activator, and
+connect Codex, Claude, MetaMCP, or another MCP client through the stdio bridge.
 
-The first proof target is Nmap NSE through
-[`examples/nmap/mcp-listen.nse`](examples/nmap/mcp-listen.nse). Agentic clients
-can connect through [MetaMCP Tools](https://github.com/buanzo/metamcp-tools)
-using [`tools/lua_mcp_stdio_bridge.py`](tools/lua_mcp_stdio_bridge.py).
-The NSE activator is also mirrored as a public gist:
-[`mcp-listen.nse`](https://gist.github.com/buanzo/3c81604041591ba83b60e8d10df90ee9).
+`liblua-mcp` is not production-ready. The alpha is meant for trusted local lab
+testing, architecture review, and early feedback from security, Nmap, Lua, and
+MCP implementers.
 
-This is experimental local-control infrastructure. The default surface is
-bounded, and arbitrary code execution is exposed only through explicitly named
-hazard tools gated by environment variables.
+## Why this exists
 
-### Current prototype surface
+Many useful applications embed Lua. If MCP support has to be implemented in
+each host application, adoption is slow and uneven. This experiment asks a
+different question: can the Lua runtime itself provide a local, opt-in MCP
+surface so host applications gain agent-facing observability by relinking
+`liblua`?
 
-`liblua-mcp` adds the built-in Lua module `mcp`, loaded by `luaL_openlibs()`.
-The module is disabled by default and only becomes available when
-`LUA_MCP_ENABLE=1` is present in the host process environment.
+The design goal is not to make Nmap speak MCP on stdout. Nmap output should
+remain normal. The MCP endpoint is local IPC owned by the embedded Lua runtime.
 
-The initial transport is a local Unix socket with filesystem permissions set to
-`0600`. MCP clients that expect stdio transport can use the repository bridge:
+## Current alpha surface
+
+This branch adds a built-in Lua module named `mcp`, loaded by
+`luaL_openlibs()`.
+
+The module is disabled unless the host process sets:
 
 ```sh
-python3 tools/lua_mcp_stdio_bridge.py --socket /run/user/1000/liblua-mcp/nmap.sock
+LUA_MCP_ENABLE=1
 ```
 
-For MetaMCP, point a server entry at that bridge command. See
-[MetaMCP Tools](https://github.com/buanzo/metamcp-tools) for the server
-catalog and runtime configuration model.
+The initial transport is a local Unix socket with permissions set to `0600`.
+Clients that need stdio transport can use:
 
-### Nmap NSE proof
+```sh
+python3 tools/lua_mcp_stdio_bridge.py --socket /tmp/liblua-mcp/nmap.sock
+```
 
-Build Nmap against this forked Lua runtime, then launch a listening pre-scan
-script without patching Nmap itself:
+The bridge is suitable for [MetaMCP Tools](https://github.com/buanzo/metamcp-tools)
+and MCP clients that speak stdio.
+
+## Build quickstart
+
+Build the Lua runtime:
+
+```sh
+make clean
+make -j2
+./lua -v
+./lua -e 'local mcp=require"mcp"; print(mcp._VERSION, mcp.available())'
+LUA_MCP_ENABLE=1 ./lua -e 'local mcp=require"mcp"; print(mcp._VERSION, mcp.available())'
+```
+
+Expected behavior:
+
+- without `LUA_MCP_ENABLE=1`, `mcp.available()` is false;
+- with `LUA_MCP_ENABLE=1`, `mcp.available()` is true;
+- no MCP protocol frames are written to application stdout.
+
+## Nmap NSE proof
+
+The canonical activator script is
+[`examples/nmap/mcp-listen.nse`](examples/nmap/mcp-listen.nse). It is also
+mirrored as a public gist:
+[`mcp-listen.nse`](https://gist.github.com/buanzo/3c81604041591ba83b60e8d10df90ee9).
+
+Build Nmap against this Lua runtime, then start a local MCP endpoint from NSE.
+One local build pattern is:
+
+```sh
+prefix=/tmp/lua-mcp-prefix
+mkdir -p "$prefix/include" "$prefix/lib"
+cp lua.h luaconf.h lauxlib.h lualib.h "$prefix/include/"
+cp liblua.a "$prefix/lib/"
+
+cd /path/to/nmap
+LIBS=-lm ./configure --with-liblua="$prefix" --without-zenmap --without-ndiff --without-ncat
+make -j2
+./nmap --version
+```
+
+Then run:
 
 ```sh
 LUA_MCP_ENABLE=1 LUA_MCP_CONTROL=1 nmap \
   --script /path/to/lua-mcp/examples/nmap/mcp-listen.nse \
-  --script-args 'mcp.socket=/run/user/1000/liblua-mcp/nmap.sock,mcp.mode=control,mcp.timeout=0' \
+  --script-args 'mcp.socket=/tmp/liblua-mcp/nmap.sock,mcp.mode=control,mcp.timeout=0' \
   -sn 127.0.0.1
 ```
 
 `mcp.timeout=0` keeps the endpoint alive until the MCP `shutdown` tool is
 called.
 
-### Safety modes
+## Safety modes
 
 `observe` is the default mode. It exposes bounded runtime inspection tools such
 as runtime info, global names, registry keys, and stack shape.
 
-`control` requires `LUA_MCP_CONTROL=1`. It allows Lua code inside the host to
-register explicit tools with `mcp.expose_tool(name, schema, fn, opts)` and lets
-the MCP client call those registered functions.
+`control` requires:
 
-`hazard` requires both control mode and this exact environment variable:
+```sh
+LUA_MCP_CONTROL=1
+```
+
+Control mode allows Lua code inside the host process to register explicit tools
+with `mcp.expose_tool(name, schema, fn, opts)`. MCP clients can call those
+registered functions.
+
+`hazard` requires control mode and this exact gate:
 
 ```sh
 LUA_MCP_HAZARD=I_UNDERSTAND_THIS_CAN_EXECUTE_CODE_INSIDE_THE_HOST_PROCESS
 ```
 
-Hazard mode is intentionally loud because it can execute or mutate code inside
-the host process:
+Hazard mode is intentionally loud:
 
-- `hazard_eval_chunk` loads and runs a Lua chunk in the embedded state.
+- `hazard_eval_chunk` loads and runs a Lua chunk inside the host process.
 - `hazard_setglobal` writes a Lua global variable by name.
 - `hazard_call_function` calls a zero-argument global Lua function by name.
 
 Use hazard mode only in trusted local lab sessions.
 
-This is the repository of Lua development code, as seen by the Lua team. It contains the full history of all commits but is mirrored irregularly. For complete information about Lua, visit [Lua.org](https://www.lua.org/).
+## Known limitations
 
-Please **do not** send pull requests. To report issues, post a message to the [Lua mailing list](https://www.lua.org/lua-l.html).
+- Unix-socket transport only.
+- Linux-oriented prototype build path.
+- No host discovery yet; clients connect to a known socket path.
+- Nmap semantic state extraction is still shallow.
+- The JSON parser and MCP coverage are intentionally minimal for the alpha.
+- No production security review has been completed.
 
-Download official Lua releases from [Lua.org](https://www.lua.org/download.html).
+## Feedback wanted
+
+Open an issue for:
+
+- build failures on specific platforms;
+- Nmap relinking and NSE proof results;
+- MCP client compatibility;
+- safety model concerns;
+- ideas for a clean Lua/runtime API boundary.
+
+Do not post sensitive vulnerability details in a public issue. See
+[`SECURITY.md`](SECURITY.md).
+
+## Upstream Lua
+
+This fork is based on the upstream Lua 5.4.8 source tree. For complete
+information about Lua, visit [Lua.org](https://www.lua.org/).
+
+The upstream Lua repository asks users not to send pull requests there. Please
+direct `liblua-mcp` experiment feedback to this fork instead.
