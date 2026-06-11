@@ -14,4 +14,5 @@ Arturo Busleiman aka Buanzo
 Jadzia / OpenAI Codex
   Implemented the initial liblua-mcp prototype branch, including the built-in
   mcp Lua module, Unix-socket MCP server, stdio bridge, Nmap NSE activator
-  example, documentation, and validation workflow.
+  example, HAProxy Lua activator example, documentation, and validation
+  workflow.

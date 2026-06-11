@@ -125,6 +125,35 @@ Hazard mode is intentionally loud:
 
 Use hazard mode only in trusted local lab sessions.
 
+## HAProxy proof
+
+HAProxy can be tested without modifying HAProxy source by compiling it with Lua
+support and pointing its Lua include/library paths at a `liblua-mcp` prefix.
+
+The activator script is
+[`examples/haproxy/mcp-listen.lua`](examples/haproxy/mcp-listen.lua). Load it
+from HAProxy with a normal `lua-load` directive:
+
+```haproxy
+global
+  lua-load /path/to/lua-mcp/examples/haproxy/mcp-listen.lua
+```
+
+Start HAProxy with:
+
+```sh
+LUA_MCP_ENABLE=1 LUA_MCP_CONTROL=1 \
+LUA_MCP_SOCKET=/run/user/1000/liblua-mcp/haproxy.sock \
+haproxy -f /path/to/haproxy.cfg -db
+```
+
+The HAProxy activator registers semantic tools such as:
+
+- `haproxy_mcp_info`
+- `haproxy_core_info`
+- `haproxy_proxy_list`
+- `haproxy_server_stats`
+
 ## Known limitations
 
 - Unix-socket transport only.
