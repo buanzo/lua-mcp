@@ -1,0 +1,18 @@
+liblua-mcp contributors
+=======================
+
+Upstream Lua team
+  Created and maintains Lua. This branch is based on the upstream Lua 5.1.1
+  source tree.
+
+Arturo Busleiman aka Buanzo
+  Conceived the liblua-mcp direction: improving liblua so embedded Lua hosts
+  can expose MCP/listen capabilities to agentic clients without each host
+  application implementing MCP directly. Directed the Nmap NSE proof target,
+  MetaMCP integration, and hazard-mode safety framing.
+
+Jadzia / OpenAI Codex
+  Implemented the initial liblua-mcp prototype branch, including the built-in
+  mcp Lua module, Unix-socket MCP server, stdio bridge, Nmap NSE activator
+  example, HAProxy Lua activator example, mpv Lua activator example,
+  documentation, version-branch porting, and validation workflow.
