@@ -69,10 +69,10 @@ CWARNS= $(CWARNSCPP) $(CWARNSC) $(CWARNGCC)
 LOCAL = $(TESTS) $(CWARNS)
 
 
-# enable Linux goodies
-MYCFLAGS= $(LOCAL) -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE
+# enable Linux goodies without requiring readline development headers
+MYCFLAGS= $(LOCAL) -std=c99 -DLUA_USE_LINUX
 MYLDFLAGS= $(LOCAL) -Wl,-E
-MYLIBS= -ldl -lreadline
+MYLIBS= -ldl
 
 
 CC= gcc
@@ -94,7 +94,7 @@ CORE_O=	lapi.o lcode.o lctype.o ldebug.o ldo.o ldump.o lfunc.o lgc.o llex.o \
 	ltm.o lundump.o lvm.o lzio.o ltests.o
 AUX_O=	lauxlib.o
 LIB_O=	lbaselib.o ldblib.o liolib.o lmathlib.o loslib.o ltablib.o lstrlib.o \
-	lutf8lib.o loadlib.o lcorolib.o linit.o
+	lutf8lib.o loadlib.o lcorolib.o lmcplib.o linit.o
 
 LUA_T=	lua
 LUA_O=	lua.o

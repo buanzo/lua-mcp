@@ -50,6 +50,7 @@ static const luaL_Reg loadedlibs[] = {
   {LUA_MATHLIBNAME, luaopen_math},
   {LUA_UTF8LIBNAME, luaopen_utf8},
   {LUA_DBLIBNAME, luaopen_debug},
+  {LUA_MCPLIBNAME, luaopen_mcp},
   {NULL, NULL}
 };
 
@@ -62,4 +63,3 @@ LUALIB_API void luaL_openlibs (lua_State *L) {
     lua_pop(L, 1);  /* remove lib */
   }
 }
-
