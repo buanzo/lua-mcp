@@ -12,6 +12,8 @@ The first proof target is Nmap NSE through
 [`examples/nmap/mcp-listen.nse`](examples/nmap/mcp-listen.nse). Agentic clients
 can connect through [MetaMCP Tools](https://github.com/buanzo/metamcp-tools)
 using [`tools/lua_mcp_stdio_bridge.py`](tools/lua_mcp_stdio_bridge.py).
+The NSE activator is also mirrored as a public gist:
+[`mcp-listen.nse`](https://gist.github.com/buanzo/3c81604041591ba83b60e8d10df90ee9).
 
 This is experimental local-control infrastructure. The default surface is
 bounded, and arbitrary code execution is exposed only through explicitly named
