@@ -1,8 +1,15 @@
 # liblua-mcp
 
-Relink, don't patch: `liblua-mcp` explores whether embedded Lua hosts can
-expose local MCP observability and controlled agentic interfaces by linking
-against an MCP-aware `liblua`.
+An MCP-aware Lua runtime for applications that embed Lua.
+
+`liblua-mcp` explores whether embedded Lua hosts can expose local MCP
+observability and controlled agentic interfaces by compiling against an
+MCP-aware `liblua`.
+
+The primary adoption model is intentional: an application that already embeds
+Lua chooses this liblua at build time. For ABI-compatible hosts, replacing a
+linked liblua can be useful as a lab proof, but that is a compatibility
+footnote rather than the project promise.
 
 This is the canonical latest-development branch of the experiment. It tracks
 upstream Lua `master`, currently reporting Lua 5.5.1 in `lua.h`. Older host
@@ -13,13 +20,23 @@ Lua ABI.
 testing, architecture review, and early feedback from Lua embedders, security
 tooling users, and MCP implementers.
 
+Public site: <https://liblua-with-mcp.buanzo.org/>
+
+## Project links
+
+- Public site: <https://liblua-with-mcp.buanzo.org/>
+- MetaMCP Tools: <https://github.com/buanzo/metamcp-tools>
+- MetaMCP public surface: <https://metamcp.buanzo.org/>
+- MetaMCP project: <https://github.com/metatool-ai/metamcp>
+- MCP specification site: <https://modelcontextprotocol.io/>
+
 ## Why this exists
 
 Many useful applications embed Lua. If MCP support has to be implemented in
 each host application, adoption is slow and uneven. This experiment asks a
 different question: can the Lua runtime itself provide a local, opt-in MCP
-surface so host applications gain agent-facing observability by relinking
-`liblua`?
+surface so host applications gain agent-facing observability by compiling
+against an MCP-aware `liblua`?
 
 The design goal is not to make Nmap speak MCP on stdout. Nmap output should
 remain normal. The MCP endpoint is local IPC owned by the embedded Lua runtime.
@@ -74,7 +91,7 @@ against the newest Lua source tree. It is the right branch for:
 - safety-mode review;
 - embedding tests against Lua latest.
 
-Do not assume every existing Lua host can relink against this branch. Many
+Do not assume every existing Lua host can build against this branch. Many
 applications check `LUA_VERSION_NUM` or vendor a specific Lua ABI.
 
 ## Compatibility proof branches
@@ -202,7 +219,7 @@ Open an issue for:
 
 - build failures on specific platforms;
 - Lua latest embedding results;
-- Nmap, HAProxy, mpv, and other host relinking proof results;
+- Nmap, HAProxy, mpv, and other host adoption proof results;
 - MCP client compatibility;
 - safety model concerns;
 - ideas for a clean Lua/runtime API boundary.
