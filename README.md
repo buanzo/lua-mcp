@@ -26,7 +26,6 @@ Public site: <https://liblua-with-mcp.buanzo.org/>
 
 - Public site: <https://liblua-with-mcp.buanzo.org/>
 - MetaMCP Tools: <https://github.com/buanzo/metamcp-tools>
-- MetaMCP public surface: <https://metamcp.buanzo.org/>
 - MetaMCP project: <https://github.com/metatool-ai/metamcp>
 - MCP specification site: <https://modelcontextprotocol.io/>
 
