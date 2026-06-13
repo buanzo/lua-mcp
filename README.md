@@ -26,7 +26,6 @@ Public site: <https://liblua-with-mcp.buanzo.org/>
 
 - Public site: <https://liblua-with-mcp.buanzo.org/>
 - MetaMCP Tools: <https://github.com/buanzo/metamcp-tools>
-- MetaMCP project: <https://github.com/metatool-ai/metamcp>
 - MCP specification site: <https://modelcontextprotocol.io/>
 
 ## Why this exists
@@ -59,8 +58,7 @@ python3 tools/lua_mcp_stdio_bridge.py --socket /tmp/liblua-mcp/nmap.sock
 ```
 
 The bridge is suitable for MCP clients that speak stdio, including Codex,
-Claude Desktop, [MetaMCP](https://github.com/metatool-ai/metamcp), and
-[MetaMCP Tools](https://github.com/buanzo/metamcp-tools).
+Claude Desktop, and [MetaMCP Tools](https://github.com/buanzo/metamcp-tools).
 
 ## Build quickstart
 
