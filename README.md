@@ -49,6 +49,26 @@ The design goal is not to make Nmap, HAProxy, mpv, or any other host speak MCP
 on stdout. Host output should remain normal. MCP runs through local IPC owned by
 the Lua side.
 
+## Two integration paths
+
+`liblua-mcp` supports two related paths:
+
+- **Replacement path:** build or relink a host against `liblua-mcp`, then use
+  the host's existing Lua loading mechanism to run an MCP activator or adapter.
+  This requires no host source patch, but it can only expose what that host
+  already makes visible to Lua.
+- **Host-cooperative path:** a host deliberately includes `lmcp.h`, registers
+  host operations as MCP tools, and calls the liblua-mcp serve API. This is the
+  clean path for a future host-native mode such as `nmap --mcp`, where the host
+  starts, initializes its Lua environment, waits for agent commands, and then
+  runs host work through registered tools.
+
+This does not grant access to private C internals that the host never exposed
+to Lua. The baseline capability is that embedded Lua can become an agent-facing
+control layer without rewriting the host application. If the host chooses to
+cooperate, `liblua-mcp` should make that integration straightforward instead of
+forcing the host to implement MCP from scratch.
+
 ## The `mcp` library
 
 This branch adds a built-in Lua module named `mcp`, loaded by
@@ -77,6 +97,16 @@ Lua-facing functions in the current alpha:
 - `mcp.expose_tool(name, schema, fn, opts)`: register a Lua function as an MCP
   tool in control mode.
 - `mcp.shutdown()`: request listener shutdown.
+- `mcp.arg_string(request, key, fallback)`,
+  `mcp.arg_number(request, key, fallback)`, and
+  `mcp.arg_boolean(request, key, fallback)`: small helpers for exposed tools
+  that receive a raw MCP request line.
+
+Host-cooperative C API:
+
+- [`lmcp.h`](lmcp.h) exposes `lua_mcp_available()`,
+  `lua_mcp_expose_cfunction()`, `lua_mcp_serve()`, `lua_mcp_shutdown()`, and
+  request-argument helpers for C tools.
 
 Built-in MCP tools include bounded runtime information, global names, registry
 shape, stack shape, exposed-tool listing, exposed-tool calls, and explicit
@@ -119,8 +149,9 @@ The examples are Lua adapters from host APIs to MCP tools. Each host decides
 what Lua can see; `liblua-mcp` makes selected Lua-visible capabilities callable
 over local MCP.
 
-- Nmap NSE: the activator starts a local listener from NSE Lua and can expose
-  NSE-oriented state.
+- Nmap NSE: the activator starts a local listener from NSE Lua, exposes
+  NSE-visible context/tools, and includes a separate gated local-lab launcher
+  for full Nmap CLI scans.
 - HAProxy: a normal `lua-load` script registers HAProxy `core` wrappers such as
   proxy and server stats.
 - mpv: the Lua 5.1 proof exposes player state and playback controls through
@@ -172,6 +203,30 @@ LUA_MCP_ENABLE=1 LUA_MCP_CONTROL=1 nmap \
 
 `mcp.timeout=0` keeps the endpoint alive until the MCP `shutdown` tool is
 called.
+
+The Nmap adapter registers tools such as:
+
+- `nmap_mcp_info`
+- `nmap_loaded_modules`
+- `nmap_api_shape`
+- `nmap_script_args`
+- `nmap_interfaces`
+- `nmap_cli_scan`
+- `nmap_run_script`
+
+`nmap_cli_scan` and `nmap_run_script` are intentionally separate from the
+embedded NSE context. They spawn a normal `nmap` subprocess for agent requests
+such as "run a port scan" or "run this NSE script", and they are disabled
+unless this explicit local-lab gate is set:
+
+```sh
+LUA_MCP_NMAP_CLI=1
+```
+
+A real `nmap --mcp` mode would be cleaner than this launcher because Nmap could
+own the lifecycle directly: initialize NSE Lua, register scan/script tools, call
+`lua_mcp_serve(...)`, and wait for agent input. That requires Nmap to
+cooperate, but still lets liblua-mcp provide the MCP plumbing.
 
 ## Safety modes
 
@@ -244,7 +299,9 @@ for player state and basic playback control.
 - Unix-socket transport only.
 - Linux-oriented prototype build path.
 - No host discovery yet; clients connect to a known socket path.
-- Host-specific semantic extraction is still shallow.
+- Replacement-path host control is limited to what the host exposes to Lua.
+- Process-lifecycle features such as a native `nmap --mcp` wait mode require
+  host cooperation through `lmcp.h`.
 - The JSON parser and MCP coverage are intentionally minimal for the alpha.
 - No production security review has been completed.
 

@@ -183,7 +183,7 @@ lmem.o: lmem.c lprefix.h lua.h luaconf.h ldebug.h lstate.h lobject.h \
  llimits.h ltm.h lzio.h lmem.h ldo.h lgc.h
 loadlib.o: loadlib.c lprefix.h lua.h luaconf.h lauxlib.h lualib.h \
  llimits.h
-lmcplib.o: lmcplib.c lprefix.h lua.h luaconf.h lauxlib.h lualib.h
+lmcplib.o: lmcplib.c lprefix.h lua.h luaconf.h lauxlib.h lualib.h lmcp.h
 lobject.o: lobject.c lprefix.h lua.h luaconf.h lctype.h llimits.h \
  ldebug.h lstate.h lobject.h ltm.h lzio.h lmem.h ldo.h lstring.h lgc.h \
  lvm.h

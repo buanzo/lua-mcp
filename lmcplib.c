@@ -25,6 +25,7 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
+#include "lmcp.h"
 
 #define MCP_VERSION "0.1.0"
 #define MCP_TOOLS_REGKEY "_LIBLUA_MCP_TOOLS"
@@ -33,6 +34,7 @@
 #define MCP_MAX_TEXT 8192
 
 static int mcp_shutdown_requested = 0;
+static char mcp_endpoint_id[128] = "";
 
 typedef struct Dbuf {
   char *data;
@@ -247,6 +249,50 @@ static int json_extract_string (const char *json, const char *key, char *out, si
   return 1;
 }
 
+static const char *json_value_start (const char *json, const char *key) {
+  char pattern[96];
+  const char *p;
+  snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+  p = strstr(json, pattern);
+  if (p == NULL)
+    return NULL;
+  p = strchr(p + strlen(pattern), ':');
+  if (p == NULL)
+    return NULL;
+  p++;
+  while (*p == ' ' || *p == '\t')
+    p++;
+  return p;
+}
+
+static int json_extract_number (const char *json, const char *key, lua_Number *out) {
+  const char *p = json_value_start(json, key);
+  char *end = NULL;
+  double value;
+  if (p == NULL || out == NULL)
+    return 0;
+  value = strtod(p, &end);
+  if (end == p)
+    return 0;
+  *out = (lua_Number)value;
+  return 1;
+}
+
+static int json_extract_boolean (const char *json, const char *key, int *out) {
+  const char *p = json_value_start(json, key);
+  if (p == NULL || out == NULL)
+    return 0;
+  if (strncmp(p, "true", 4) == 0) {
+    *out = 1;
+    return 1;
+  }
+  if (strncmp(p, "false", 5) == 0) {
+    *out = 0;
+    return 1;
+  }
+  return 0;
+}
+
 static int json_extract_id (const char *json, char *out, size_t outcap) {
   const char *p = strstr(json, "\"id\"");
   size_t len = 0;
@@ -302,6 +348,11 @@ static char *runtime_info_json (lua_State *L) {
   dbuf_add(&b, "{");
   dbuf_add(&b, "\"server\":\"liblua-mcp\",");
   dbuf_add(&b, "\"version\":\"" MCP_VERSION "\",");
+  if (mcp_endpoint_id[0] != '\0') {
+    dbuf_add(&b, "\"id\":");
+    dbuf_json_string(&b, mcp_endpoint_id, sizeof(mcp_endpoint_id));
+    dbuf_add(&b, ",");
+  }
   dbuf_addf(&b, "\"pid\":%ld,", (long)getpid());
   dbuf_add(&b, "\"lua_version\":");
   dbuf_json_string(&b, LUA_RELEASE, MCP_MAX_TEXT);
@@ -435,12 +486,162 @@ static char *exposed_tools_json (lua_State *L) {
   return b.data;
 }
 
-static void add_tool_descriptor (Dbuf *b, const char *name, const char *description) {
+static int lua_table_is_array (lua_State *L, int idx) {
+  int abs = lua_absindex(L, idx);
+  int is_array = 1;
+  lua_Integer keynum;
+  lua_pushnil(L);
+  while (lua_next(L, abs) != 0) {
+    if (!lua_isinteger(L, -2)) {
+      is_array = 0;
+    }
+    else {
+      keynum = lua_tointeger(L, -2);
+      if (keynum < 1)
+        is_array = 0;
+    }
+    lua_pop(L, 1);
+    if (!is_array) {
+      lua_pop(L, 1);
+      break;
+    }
+  }
+  return is_array;
+}
+
+static void dbuf_lua_json_value (Dbuf *b, lua_State *L, int idx, int depth);
+
+static void dbuf_lua_table_json (Dbuf *b, lua_State *L, int idx, int depth) {
+  int abs = lua_absindex(L, idx);
+  int need_comma = 0;
+  int count = 0;
+  if (depth <= 0) {
+    dbuf_add(b, "{}");
+    return;
+  }
+  if (lua_table_is_array(L, abs)) {
+    lua_Unsigned n = (lua_Unsigned)lua_rawlen(L, abs);
+    lua_Unsigned i;
+    dbuf_add(b, "[");
+    for (i = 1; i <= n && count < MCP_MAX_ITEMS; i++) {
+      if (need_comma)
+        dbuf_add(b, ",");
+      lua_geti(L, abs, (lua_Integer)i);
+      dbuf_lua_json_value(b, L, -1, depth - 1);
+      lua_pop(L, 1);
+      need_comma = 1;
+      count++;
+    }
+    dbuf_add(b, "]");
+    return;
+  }
+  dbuf_add(b, "{");
+  lua_pushnil(L);
+  while (count < MCP_MAX_ITEMS && lua_next(L, abs) != 0) {
+    const char *key = NULL;
+    char number_key[64];
+    if (lua_type(L, -2) == LUA_TSTRING) {
+      key = lua_tostring(L, -2);
+    }
+    else if (lua_isnumber(L, -2)) {
+      snprintf(number_key, sizeof(number_key), "%g", (double)lua_tonumber(L, -2));
+      key = number_key;
+    }
+    if (key != NULL) {
+      if (need_comma)
+        dbuf_add(b, ",");
+      dbuf_json_string(b, key, 256);
+      dbuf_add(b, ":");
+      dbuf_lua_json_value(b, L, -1, depth - 1);
+      need_comma = 1;
+      count++;
+    }
+    lua_pop(L, 1);
+  }
+  if (count >= MCP_MAX_ITEMS)
+    lua_pop(L, 1);
+  dbuf_add(b, "}");
+}
+
+static void dbuf_lua_json_value (Dbuf *b, lua_State *L, int idx, int depth) {
+  int abs = lua_absindex(L, idx);
+  int type = lua_type(L, abs);
+  switch (type) {
+    case LUA_TNIL:
+      dbuf_add(b, "null");
+      break;
+    case LUA_TBOOLEAN:
+      dbuf_add(b, lua_toboolean(L, abs) ? "true" : "false");
+      break;
+    case LUA_TNUMBER:
+      dbuf_addf(b, "%.14g", (double)lua_tonumber(L, abs));
+      break;
+    case LUA_TSTRING:
+      dbuf_json_string(b, lua_tostring(L, abs), MCP_MAX_TEXT);
+      break;
+    case LUA_TTABLE:
+      dbuf_lua_table_json(b, L, abs, depth);
+      break;
+    default:
+      dbuf_json_string(b, safe_typename(L, abs), 64);
+      break;
+  }
+}
+
+static int schema_json_is_object (const char *schema) {
+  const char *p = schema;
+  if (p == NULL)
+    return 0;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+    p++;
+  return *p == '{';
+}
+
+static void add_default_input_schema (Dbuf *b) {
+  dbuf_add(b, "{\"type\":\"object\",\"additionalProperties\":true}");
+}
+
+static void add_tool_input_schema (Dbuf *b, lua_State *L, int toolidx) {
+  int abs;
+  const char *schema_json;
+  if (L == NULL || toolidx == 0) {
+    add_default_input_schema(b);
+    return;
+  }
+  abs = lua_absindex(L, toolidx);
+  lua_getfield(L, abs, "schema_json");
+  schema_json = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
+  if (schema_json_is_object(schema_json) && strlen(schema_json) <= MCP_MAX_TEXT) {
+    dbuf_add(b, schema_json);
+    lua_pop(L, 1);
+    return;
+  }
+  lua_pop(L, 1);
+  lua_getfield(L, abs, "schema");
+  if (lua_istable(L, -1)) {
+    dbuf_lua_json_value(b, L, -1, 6);
+    lua_pop(L, 1);
+    return;
+  }
+  schema_json = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
+  if (schema_json_is_object(schema_json) && strlen(schema_json) <= MCP_MAX_TEXT) {
+    dbuf_add(b, schema_json);
+    lua_pop(L, 1);
+    return;
+  }
+  lua_pop(L, 1);
+  add_default_input_schema(b);
+}
+
+static void add_tool_descriptor (Dbuf *b, const char *name,
+    const char *description, lua_State *L, int toolidx) {
   dbuf_add(b, "{\"name\":");
   dbuf_json_string(b, name, 256);
   dbuf_add(b, ",\"description\":");
   dbuf_json_string(b, description, MCP_MAX_TEXT);
-  dbuf_add(b, ",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":true}}");
+  dbuf_add(b, ",\"inputSchema\":");
+  add_tool_input_schema(b, L, toolidx);
+  dbuf_add(b, "}");
 }
 
 static char *tools_list_json (lua_State *L) {
@@ -448,7 +649,8 @@ static char *tools_list_json (lua_State *L) {
   int need_comma = 0;
   dbuf_init(&b);
   dbuf_add(&b, "{\"tools\":[");
-#define ADD_TOOL(n, d) do { if (need_comma) dbuf_add(&b, ","); add_tool_descriptor(&b, (n), (d)); need_comma = 1; } while (0)
+#define ADD_TOOL(n, d) do { if (need_comma) dbuf_add(&b, ","); add_tool_descriptor(&b, (n), (d), NULL, 0); need_comma = 1; } while (0)
+#define ADD_EXPOSED_TOOL(n, d, idx) do { if (need_comma) dbuf_add(&b, ","); add_tool_descriptor(&b, (n), (d), L, (idx)); need_comma = 1; } while (0)
   ADD_TOOL("runtime_info", "Return liblua-mcp runtime information.");
   ADD_TOOL("lua_globals_list", "Return a bounded summary of Lua globals.");
   ADD_TOOL("lua_registry_list", "Return a bounded summary of Lua registry keys.");
@@ -466,13 +668,14 @@ static char *tools_list_json (lua_State *L) {
   if (mcp_control_enabled()) while (lua_next(L, -2) != 0) {
     if (lua_type(L, -2) == LUA_TSTRING) {
       const char *name = lua_tostring(L, -2);
-      ADD_TOOL(name, "Lua function registered by mcp.expose_tool.");
+      ADD_EXPOSED_TOOL(name, "Lua function registered by mcp.expose_tool.", -1);
     }
     lua_pop(L, 1);
   }
   lua_pop(L, 1);
   dbuf_add(&b, "]}");
 #undef ADD_TOOL
+#undef ADD_EXPOSED_TOOL
   if (b.oom) {
     dbuf_free(&b);
     return NULL;
@@ -509,6 +712,11 @@ static char *call_exposed_tool (lua_State *L, const char *name, const char *requ
       dbuf_json_string(&b, lua_toboolean(L, -1) ? "true" : "false", 16);
     else
       dbuf_json_string(&b, lua_tostring(L, -1), MCP_MAX_TEXT);
+    dbuf_add(&b, "}");
+  }
+  else if (lua_istable(L, -1)) {
+    dbuf_add(&b, "{\"result\":");
+    dbuf_lua_json_value(&b, L, -1, 6);
     dbuf_add(&b, "}");
   }
   else {
@@ -809,64 +1017,62 @@ static lua_Number opt_number_field (lua_State *L, int idx, const char *key,
   return value;
 }
 
-static int l_available (lua_State *L) {
-  lua_pushboolean(L, mcp_enabled());
-  return 1;
+static void mcp_set_error (char *errbuf, size_t errcap, const char *fmt, ...) {
+  va_list ap;
+  if (errbuf == NULL || errcap == 0)
+    return;
+  va_start(ap, fmt);
+  vsnprintf(errbuf, errcap, fmt, ap);
+  va_end(ap);
 }
 
-static int l_shutdown (lua_State *L) {
-  mcp_shutdown_requested = 1;
-  lua_pushboolean(L, 1);
-  return 1;
-}
-
-static int l_expose_tool (lua_State *L) {
-  const char *name = luaL_checkstring(L, 1);
-  luaL_checkany(L, 2);
-  luaL_checktype(L, 3, LUA_TFUNCTION);
-  get_tools_table(L);
-  lua_newtable(L);
-  lua_pushvalue(L, 2);
-  lua_setfield(L, -2, "schema");
-  lua_pushvalue(L, 3);
-  lua_setfield(L, -2, "fn");
-  if (!lua_isnoneornil(L, 4)) {
-    lua_pushvalue(L, 4);
-    lua_setfield(L, -2, "opts");
+static void mcp_set_endpoint_id (const char *id) {
+  if (id == NULL || id[0] == '\0') {
+    mcp_endpoint_id[0] = '\0';
+    return;
   }
-  lua_setfield(L, -2, name);
-  lua_pop(L, 1);
-  lua_pushboolean(L, 1);
-  return 1;
+  snprintf(mcp_endpoint_id, sizeof(mcp_endpoint_id), "%s", id);
 }
 
-static int l_serve (lua_State *L) {
-  char default_sock[sizeof(((struct sockaddr_un *)0)->sun_path)];
-  const char *socket_path;
-  const char *mode;
-  lua_Number timeout_n;
-  int timeout_s;
+static int mcp_serve_impl (lua_State *L, const char *socket_path,
+    const char *mode, int timeout_s, const char *id,
+    char *errbuf, size_t errcap) {
   int server_fd;
   struct sockaddr_un addr;
   time_t deadline = 0;
-  if (!mcp_enabled())
-    return luaL_error(L, "liblua-mcp is disabled; set LUA_MCP_ENABLE=1");
-  default_socket_path(default_sock, sizeof(default_sock));
-  socket_path = opt_string_field(L, 1, "socket", default_sock);
-  mode = opt_string_field(L, 1, "mode", "observe");
-  timeout_n = opt_number_field(L, 1, "timeout", 0);
-  timeout_s = timeout_n > 0 ? (int)timeout_n : 0;
-  if (strcmp(mode, "control") == 0 && !mcp_control_enabled())
-    return luaL_error(L, "control mode requires LUA_MCP_CONTROL=1");
-  if (strcmp(mode, "hazard") == 0 && !mcp_hazard_enabled())
-    return luaL_error(L, "hazard mode requires explicit LUA_MCP_HAZARD gate");
-  if (strlen(socket_path) >= sizeof(addr.sun_path))
-    return luaL_error(L, "socket path is too long");
-  if (mkdir_parents(socket_path) != 0)
-    return luaL_error(L, "could not create socket parent directories: %s", strerror(errno));
+  if (socket_path == NULL || socket_path[0] == '\0') {
+    mcp_set_error(errbuf, errcap, "socket path is required");
+    return -1;
+  }
+  if (mode == NULL || mode[0] == '\0')
+    mode = "observe";
+  if (timeout_s < 0)
+    timeout_s = 0;
+  if (!mcp_enabled()) {
+    mcp_set_error(errbuf, errcap, "liblua-mcp is disabled; set LUA_MCP_ENABLE=1");
+    return -1;
+  }
+  if (strcmp(mode, "control") == 0 && !mcp_control_enabled()) {
+    mcp_set_error(errbuf, errcap, "control mode requires LUA_MCP_CONTROL=1");
+    return -1;
+  }
+  if (strcmp(mode, "hazard") == 0 && !mcp_hazard_enabled()) {
+    mcp_set_error(errbuf, errcap, "hazard mode requires explicit LUA_MCP_HAZARD gate");
+    return -1;
+  }
+  if (strlen(socket_path) >= sizeof(addr.sun_path)) {
+    mcp_set_error(errbuf, errcap, "socket path is too long");
+    return -1;
+  }
+  if (mkdir_parents(socket_path) != 0) {
+    mcp_set_error(errbuf, errcap, "could not create socket parent directories: %s", strerror(errno));
+    return -1;
+  }
   server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (server_fd < 0)
-    return luaL_error(L, "socket failed: %s", strerror(errno));
+  if (server_fd < 0) {
+    mcp_set_error(errbuf, errcap, "socket failed: %s", strerror(errno));
+    return -1;
+  }
   memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
@@ -874,16 +1080,19 @@ static int l_serve (lua_State *L) {
   if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
     int err = errno;
     close(server_fd);
-    return luaL_error(L, "bind failed: %s", strerror(err));
+    mcp_set_error(errbuf, errcap, "bind failed: %s", strerror(err));
+    return -1;
   }
   chmod(socket_path, 0600);
   if (listen(server_fd, 4) != 0) {
     int err = errno;
     close(server_fd);
     unlink(socket_path);
-    return luaL_error(L, "listen failed: %s", strerror(err));
+    mcp_set_error(errbuf, errcap, "listen failed: %s", strerror(err));
+    return -1;
   }
   mcp_shutdown_requested = 0;
+  mcp_set_endpoint_id(id);
   if (timeout_s > 0)
     deadline = time(NULL) + timeout_s;
   while (!mcp_shutdown_requested) {
@@ -919,8 +1128,200 @@ static int l_serve (lua_State *L) {
   }
   close(server_fd);
   unlink(socket_path);
+  mcp_endpoint_id[0] = '\0';
+  return 0;
+}
+
+static int l_available (lua_State *L) {
+  lua_pushboolean(L, mcp_enabled());
+  return 1;
+}
+
+static int l_shutdown (lua_State *L) {
+  mcp_shutdown_requested = 1;
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int l_expose_tool (lua_State *L) {
+  const char *name = luaL_checkstring(L, 1);
+  luaL_checkany(L, 2);
+  luaL_checktype(L, 3, LUA_TFUNCTION);
+  get_tools_table(L);
+  lua_newtable(L);
+  lua_pushvalue(L, 2);
+  if (lua_type(L, -1) == LUA_TSTRING)
+    lua_setfield(L, -2, "schema_json");
+  else
+    lua_setfield(L, -2, "schema");
+  lua_pushvalue(L, 3);
+  lua_setfield(L, -2, "fn");
+  if (!lua_isnoneornil(L, 4)) {
+    lua_pushvalue(L, 4);
+    lua_setfield(L, -2, "opts");
+  }
+  lua_setfield(L, -2, name);
+  lua_pop(L, 1);
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int l_serve (lua_State *L) {
+  char default_sock[sizeof(((struct sockaddr_un *)0)->sun_path)];
+  const char *socket_path;
+  const char *mode;
+  lua_Number timeout_n;
+  int timeout_s;
+  const char *id;
+  char errbuf[256];
+  default_socket_path(default_sock, sizeof(default_sock));
+  socket_path = opt_string_field(L, 1, "socket", default_sock);
+  mode = opt_string_field(L, 1, "mode", "observe");
+  timeout_n = opt_number_field(L, 1, "timeout", 0);
+  timeout_s = timeout_n > 0 ? (int)timeout_n : 0;
+  id = opt_string_field(L, 1, "id", NULL);
+  if (mcp_serve_impl(L, socket_path, mode, timeout_s, id,
+        errbuf, sizeof(errbuf)) != 0)
+    return luaL_error(L, "%s", errbuf);
   lua_pushfstring(L, "liblua-mcp stopped (%s)", socket_path);
   return 1;
+}
+
+static int l_arg_string (lua_State *L) {
+  const char *line = luaL_checkstring(L, 1);
+  const char *key = luaL_checkstring(L, 2);
+  const char *fallback = luaL_optstring(L, 3, NULL);
+  char out[MCP_MAX_TEXT];
+  if (json_extract_string(line, key, out, sizeof(out))) {
+    lua_pushstring(L, out);
+    return 1;
+  }
+  if (fallback != NULL) {
+    lua_pushstring(L, fallback);
+    return 1;
+  }
+  lua_pushnil(L);
+  return 1;
+}
+
+static int l_arg_number (lua_State *L) {
+  const char *line = luaL_checkstring(L, 1);
+  const char *key = luaL_checkstring(L, 2);
+  lua_Number fallback = luaL_optnumber(L, 3, 0);
+  lua_Number value;
+  if (json_extract_number(line, key, &value)) {
+    lua_pushnumber(L, value);
+    return 1;
+  }
+  if (!lua_isnoneornil(L, 3)) {
+    lua_pushnumber(L, fallback);
+    return 1;
+  }
+  lua_pushnil(L);
+  return 1;
+}
+
+static int l_arg_boolean (lua_State *L) {
+  const char *line = luaL_checkstring(L, 1);
+  const char *key = luaL_checkstring(L, 2);
+  int fallback = lua_toboolean(L, 3);
+  int value;
+  if (json_extract_boolean(line, key, &value)) {
+    lua_pushboolean(L, value);
+    return 1;
+  }
+  if (!lua_isnoneornil(L, 3)) {
+    lua_pushboolean(L, fallback);
+    return 1;
+  }
+  lua_pushnil(L);
+  return 1;
+}
+
+LUA_API int lua_mcp_available (void) {
+  return mcp_enabled();
+}
+
+LUA_API int lua_mcp_expose_cfunction (lua_State *L, const char *name,
+    const char *schema_json, lua_CFunction fn) {
+  int top;
+  if (L == NULL || name == NULL || name[0] == '\0' || fn == NULL)
+    return -1;
+  top = lua_gettop(L);
+  get_tools_table(L);
+  lua_newtable(L);
+  if (schema_json != NULL && schema_json[0] != '\0') {
+    lua_pushstring(L, schema_json);
+    lua_setfield(L, -2, "schema_json");
+  }
+  else {
+    lua_newtable(L);
+    lua_setfield(L, -2, "schema");
+  }
+  lua_pushcfunction(L, fn);
+  lua_setfield(L, -2, "fn");
+  lua_setfield(L, -2, name);
+  lua_settop(L, top);
+  return 0;
+}
+
+LUA_API int lua_mcp_serve (lua_State *L, const lua_McpConfig *config) {
+  char default_sock[sizeof(((struct sockaddr_un *)0)->sun_path)];
+  const char *socket_path;
+  const char *mode;
+  const char *id;
+  int timeout_s;
+  char errbuf[256];
+  if (L == NULL)
+    return -1;
+  default_socket_path(default_sock, sizeof(default_sock));
+  socket_path = (config != NULL && config->socket != NULL &&
+      config->socket[0] != '\0') ? config->socket : default_sock;
+  mode = (config != NULL && config->mode != NULL &&
+      config->mode[0] != '\0') ? config->mode : "observe";
+  timeout_s = config != NULL ? config->timeout_seconds : 0;
+  id = config != NULL ? config->id : NULL;
+  return mcp_serve_impl(L, socket_path, mode, timeout_s, id,
+      errbuf, sizeof(errbuf));
+}
+
+LUA_API int lua_mcp_shutdown (lua_State *L) {
+  (void)L;
+  mcp_shutdown_requested = 1;
+  return 0;
+}
+
+LUA_API int lua_mcp_arg_string (lua_State *L, int request_index,
+    const char *key, char *out, size_t outcap) {
+  const char *line;
+  if (L == NULL || key == NULL || out == NULL || outcap == 0)
+    return 0;
+  line = lua_isstring(L, request_index) ? lua_tostring(L, request_index) : NULL;
+  if (line == NULL)
+    return 0;
+  return json_extract_string(line, key, out, outcap);
+}
+
+LUA_API int lua_mcp_arg_number (lua_State *L, int request_index,
+    const char *key, lua_Number *out) {
+  const char *line;
+  if (L == NULL || key == NULL || out == NULL)
+    return 0;
+  line = lua_isstring(L, request_index) ? lua_tostring(L, request_index) : NULL;
+  if (line == NULL)
+    return 0;
+  return json_extract_number(line, key, out);
+}
+
+LUA_API int lua_mcp_arg_boolean (lua_State *L, int request_index,
+    const char *key, int *out) {
+  const char *line;
+  if (L == NULL || key == NULL || out == NULL)
+    return 0;
+  line = lua_isstring(L, request_index) ? lua_tostring(L, request_index) : NULL;
+  if (line == NULL)
+    return 0;
+  return json_extract_boolean(line, key, out);
 }
 
 static const luaL_Reg mcplib[] = {
@@ -929,6 +1330,9 @@ static const luaL_Reg mcplib[] = {
   {"serve", l_serve},
   {"expose_tool", l_expose_tool},
   {"shutdown", l_shutdown},
+  {"arg_string", l_arg_string},
+  {"arg_number", l_arg_number},
+  {"arg_boolean", l_arg_boolean},
   {NULL, NULL}
 };
 

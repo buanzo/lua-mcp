@@ -16,5 +16,6 @@ Jadzia / OpenAI Codex
   Implemented the initial liblua-mcp prototype branch, including the built-in
   mcp Lua module, Unix-socket MCP server, stdio bridge, Nmap NSE activator
   example, HAProxy Lua activator example, Lua latest port, bridge regression
-  tests, documentation, validation workflow, roadmap, and README/public-site
+  tests, host-cooperative C API, schema-aware exposed tools, Nmap NSE adapter
+  tools, documentation, validation workflow, roadmap, and README/public-site
   framing updates.
