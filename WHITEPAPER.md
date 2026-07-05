@@ -19,11 +19,11 @@ output, lifecycle, and embedding model.
 Nmap is a useful case study because its Nmap Scripting Engine (NSE) is already
 Lua-based and already used to automate network discovery and service analysis.
 In a local proof, an MCP client reached a live Nmap process through
-`liblua-mcp`, invoked a Lua-exposed proof tool, caused a trace/debug Nmap scan,
-and verified the scan artifacts while the MCP call was in flight. The proof is
-small and deliberately local, but it demonstrates the larger architectural
-point: embedded Lua can become a local agent-facing control plane for host
-capabilities that Lua can already reach.
+`liblua-mcp`, invoked a Lua-exposed proof tool, caused an evidence-producing
+Nmap scan, and verified the scan result while the MCP call was in flight. The
+proof is small and deliberately local, but it demonstrates the larger
+architectural point: embedded Lua can become a local agent-facing control plane
+for host capabilities that Lua can already reach.
 
 ## 1. Problem
 
@@ -113,13 +113,13 @@ forwarded requests to the Nmap-owned Unix socket.
 The proof did not call the system `nmap` binary directly from the agent. The
 agent reached a live custom Nmap process through MCP, listed the tools exposed
 by the embedded Lua runtime, invoked `nmap_trace_proof`, and received metadata
-about the scan and artifact paths.
+about the scan result.
 
 The scan target was restricted to loopback proof services. One service returned
 a distinctive TCP banner; the other served a small HTTP page with a distinctive
 title. This kept the proof free of third-party network effects while still
 exercising the Nmap paths that matter for agentic service analysis: service
-version detection, NSE script execution, debug tracing, and artifact emission.
+version detection, NSE script execution, trace capture, and structured output.
 The proof harness recorded MCP traffic separately from Nmap output so that the
 control interaction could be evaluated independently from the scan result.
 
@@ -130,7 +130,7 @@ sequenceDiagram
     participant Listener as liblua-mcp listener in Nmap
     participant NSE as NSE Lua proof tool
     participant Scan as child Nmap trace scan
-    participant Files as evidence files
+    participant Analysis as post-scan analysis
 
     Agent->>Bridge: initialize, tools/list
     Bridge->>Listener: forward MCP requests
@@ -139,43 +139,22 @@ sequenceDiagram
     Bridge->>Listener: lua_mcp_call
     Listener->>NSE: invoke proof tool
     NSE->>Scan: launch gated local trace scan
-    Scan->>Files: write console, XML, normal, grepable logs
-    Files-->>Agent: post-run analysis reads artifacts
+    Scan->>Analysis: produce normal Nmap outputs
+    Analysis-->>Agent: summarize services and evidence
 ```
 
-The final local proof run was `20260705T164428Z-2926e7cd`. It recorded 22
-passing assertions. The MCP transcript showed `initialize`, `tools/list`, and
-the proof tool call. The scan produced normal Nmap output, XML, grepable
-output, a debug console log, and a JSONL evidence timeline. The timeline showed
-`scan.nmap`, `scan.xml`, `scan.gnmap`, and `nmap.console.log` appearing and
-growing before the MCP scan call returned, which is important: the agentic
-interaction and the host-generated evidence were concurrent parts of the same
-operation.
+The local proof recorded a passing assertion set. The MCP transcript showed
+client initialization, tool listing, and a proof-tool call. The scan produced
+normal Nmap outputs and a separate evidence timeline. The timeline showed host
+outputs appearing before the MCP scan call returned, which is important: the
+agentic interaction and the host-generated evidence were concurrent parts of
+the same operation.
 
-The proof report was committed in the tools repository at commit `9d3bf94`
-(`Add liblua-mcp Nmap trace proof harness`). That commit added the local proof
-harness, a curated report, and a script-guide entry so the experiment can be
-re-run and reviewed instead of treated as an ephemeral chat transcript.
-
-The Nmap result identified two local proof services. One was a TCP banner
-service, where NSE script output included:
-
-```text
-|_banner: TRACE-PROOF 20260705T164428Z-2926e7cd liblua-mcp nmap
-```
-
-The other was an HTTP service identified as `BaseHTTPServer 0.6`, with an
-`http-title` result:
-
-```text
-|_http-title: liblua-mcp trace 20260705T164428Z-2926e7cd
-```
-
-The proof also hashed each artifact. For example, the MCP transcript was 8104
-bytes with SHA-256
-`725685d70d9477353a00a66682e5eb017e04b8eb0311e351c836c728d063239b`, and
-`nmap.console.log` was 26476 bytes with SHA-256
-`fc63c2e5634cca48a0a0c7512685cca1e064b717dd43b18c76d2c3445f420181`.
+The Nmap result identified both local proof services. One was a plain TCP
+service with a distinctive banner, and the other was an HTTP service whose
+title was extracted by NSE. That is enough to show agent-triggered service
+analysis through the Lua-mediated path without publishing lab identifiers,
+private network targets, or raw trace material in the public repository.
 
 The key result is not merely that an agent can run a command named `nmap`.
 Command execution alone would not prove the project thesis. The result is that
@@ -272,5 +251,3 @@ surface.
 - Lua C API overview: <https://www.lua.org/pil/24.html>
 - Nmap Scripting Engine manual: <https://nmap.org/book/man-nse.html>
 - Nmap NSE language documentation: <https://nmap.org/book/nse-language.html>
-- liblua-mcp Nmap trace proof report:
-  `/home/buanzo/git/tools/.plans/infosec/liblua-mcp/nmap-trace-proof-2026-07-05.md`
