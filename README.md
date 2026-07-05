@@ -5,14 +5,19 @@ Lua as an MCP control layer for software that embeds Lua.
 `liblua-mcp` is a Lua fork that adds a built-in `mcp` library. Many
 applications already embed Lua and expose host behavior to Lua scripts:
 commands, state, callbacks, plugin APIs, or domain-specific objects.
-`liblua-mcp` lets that Lua scripting surface publish selected capabilities as
-local MCP tools.
+`liblua-mcp` turns that existing Lua world into a local MCP aperture.
 
-The host application does not need to speak MCP. MCP clients do not get
-unrestricted access to the whole process. They can inspect bounded Lua runtime
-state and call only the tools that Lua code explicitly exposes with
-`mcp.expose_tool`, subject to the enable, control, and hazard gates documented
-below.
+The host application does not need to speak MCP. The project promise is not a
+custom MCP server for every Lua-embedding host. The promise is that an MCP
+client can reach the Lua state that the host already populated: inspect
+bounded Lua-visible state, call Lua-visible functions or methods in control
+mode, and use explicit `mcp.expose_tool` wrappers when a cleaner schema or
+safer operation boundary is useful.
+
+That is the useful "magic": the host's Lua API already contains host meaning.
+`liblua-mcp` gives an agent a protocol path into that API. It does not reveal
+private C internals that the host never exposed to Lua, and control mode is a
+trusted local capability, not a production sandbox.
 
 This is the canonical latest-development branch of the experiment. It tracks
 upstream Lua `master`, currently reporting Lua 5.5.1 in `lua.h`. Older host
@@ -41,8 +46,9 @@ another language. A host embeds Lua, exposes useful host APIs to scripts, and
 lets users extend behavior without changing the host source tree.
 
 `liblua-mcp` asks what happens when that existing Lua scripting surface can
-also speak MCP. A Lua script can start a local listener, register wrappers
-around host APIs, and make those wrappers available to MCP clients. Nmap,
+also speak MCP. A Lua script can start a local listener; the runtime can expose
+generic discovery and call tools over the current Lua state; and adapters can
+add polished, schema-aware wrappers around host APIs when needed. Nmap,
 HAProxy, and mpv are proof targets because they already show different styles
 of host capability exposed through Lua.
 
@@ -56,8 +62,9 @@ the Lua side.
 
 - **Replacement path:** build or relink a host against `liblua-mcp`, then use
   the host's existing Lua loading mechanism to run an MCP activator or adapter.
-  This requires no host source patch, but it can only expose what that host
-  already makes visible to Lua.
+  This requires no host source patch. The generic MCP tools can inspect and
+  call what that host already makes visible to Lua, and optional Lua adapters
+  can present selected operations as named tools with schemas.
 - **Host-cooperative path:** a host deliberately includes `lmcp.h`, registers
   host operations as MCP tools, and calls the liblua-mcp serve API. This is the
   clean path for a future host-native mode such as `nmap --mcp`, where the host
@@ -65,10 +72,11 @@ the Lua side.
   runs host work through registered tools.
 
 This does not grant access to private C internals that the host never exposed
-to Lua. The baseline capability is that embedded Lua can become an agent-facing
-control layer without rewriting the host application. If the host chooses to
-cooperate, `liblua-mcp` should make that integration straightforward instead of
-forcing the host to implement MCP from scratch.
+to Lua. The baseline capability is that embedded Lua can become an
+agent-facing control layer without rewriting the host application or writing a
+new host-specific MCP server. If the host chooses to cooperate, `liblua-mcp`
+should make that integration straightforward instead of forcing the host to
+implement MCP from scratch.
 
 ## The `mcp` library
 
@@ -109,9 +117,23 @@ Host-cooperative C API:
   `lua_mcp_expose_cfunction()`, `lua_mcp_serve()`, `lua_mcp_shutdown()`, and
   request-argument helpers for C tools.
 
-Built-in MCP tools include bounded runtime information, global names, registry
-shape, stack shape, exposed-tool listing, exposed-tool calls, and explicit
-hazard tools when the hazard gate is set.
+Built-in MCP tools include:
+
+- observe-mode discovery: `runtime_info`, `lua_globals_list`,
+  `lua_registry_list`, `lua_stack_snapshot`, and `lua_value_inspect`;
+- control-mode invocation: `lua_function_call`, `lua_method_call`,
+  `lua_exposed_tool_call`, plus tools registered with `mcp.expose_tool`;
+- lifecycle: `shutdown`;
+- hazard-mode escape hatches: `hazard_eval_chunk`, `hazard_setglobal`, and
+  `hazard_call_function` when the explicit hazard gate is set.
+
+`lua_value_inspect` resolves dot-separated global paths such as
+`nmap.registry` or `core.proxies` and returns bounded type, shape, and value
+data. `lua_function_call` and `lua_method_call` call Lua-visible functions and
+colon-style methods in control mode. Current alpha call arguments are a JSON
+array of primitive values: strings, numbers, booleans, and null. For
+`lua_method_call`, use `receiver` for the table path and `member` for the
+method name.
 
 ## Build quickstart
 
@@ -146,9 +168,11 @@ applications check `LUA_VERSION_NUM` or vendor a specific Lua ABI.
 
 ## Host examples
 
-The examples are Lua adapters from host APIs to MCP tools. Each host decides
-what Lua can see; `liblua-mcp` makes selected Lua-visible capabilities callable
-over local MCP.
+The examples are Lua activators and adapters over host APIs. Each host decides
+what Lua can see; `liblua-mcp` makes that Lua-visible surface inspectable and,
+in control mode, callable over local MCP. Adapter scripts are still useful
+when a host operation needs a stable name, schema, guardrail, or friendlier
+return structure.
 
 - Nmap NSE: the activator starts a local listener from NSE Lua, exposes
   NSE-visible context/tools, and includes a separate gated local-lab launcher
@@ -159,7 +183,8 @@ over local MCP.
   mpv's Lua API.
 
 These examples are not host-specific MCP implementations. They are Lua scripts
-using the same built-in `mcp` library.
+using the same built-in `mcp` library. The generic aperture remains in
+`liblua-mcp`; host-specific scripts are optional interpretation layers.
 
 ## Compatibility proof branches
 
@@ -242,7 +267,8 @@ cooperate, but still lets liblua-mcp provide the MCP plumbing.
 ## Safety modes
 
 `observe` is the default mode. It exposes bounded runtime inspection tools such
-as runtime info, global names, registry keys, and stack shape.
+as runtime info, global names, registry keys, stack shape, and
+`lua_value_inspect` for Lua-visible paths.
 
 `control` requires:
 
@@ -250,9 +276,15 @@ as runtime info, global names, registry keys, and stack shape.
 LUA_MCP_CONTROL=1
 ```
 
-Control mode allows Lua code inside the host process to register explicit tools
-with `mcp.expose_tool(name, schema, fn, opts)`. MCP clients can call those
-registered functions.
+Control mode allows MCP clients to call Lua-visible functions and table
+methods with `lua_function_call` and `lua_method_call`. Lua code inside the
+host process can also register explicit tools with
+`mcp.expose_tool(name, schema, fn, opts)`, and those registered functions can
+be called as named MCP tools.
+
+Treat control mode as trusted local control. It can trigger side effects
+through whatever functions the host has made visible to Lua. Use explicit
+wrappers when an operation needs a narrower contract than generic path calling.
 
 `hazard` requires control mode and this exact gate:
 

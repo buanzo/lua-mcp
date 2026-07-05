@@ -2,15 +2,30 @@
 
 `liblua-mcp` explores Lua as an MCP control layer for software that embeds Lua.
 The roadmap focuses on making the built-in `mcp` library useful, safe, and easy
-to adapt to host APIs that Lua scripts can already reach, while also giving
+to use against host APIs that Lua scripts can already reach, while also giving
 cooperating hosts a small C API for cleaner first-class MCP modes.
+
+## Generic Lua aperture
+
+- Treat the host-populated Lua state as the primary surface: inspect bounded
+  Lua-visible state, then call Lua-visible functions and methods under an
+  explicit control gate.
+- Keep `lua_value_inspect`, `lua_function_call`, and `lua_method_call`
+  host-agnostic. Nmap, HAProxy, mpv, and future hosts should prove the same
+  mechanism rather than becoming separate MCP server designs.
+- Improve path resolution beyond simple dot-separated globals only when it
+  remains reviewable and bounded.
+- Expand call arguments from primitive JSON values to structured Lua tables
+  after the safety and error semantics are clear.
+- Make discovery output useful to agents without dumping large values,
+  pointers, secrets, or raw process internals.
 
 ## The `mcp` library
 
 - Stabilize `mcp.available`, `mcp.serve/listen`, `mcp.expose_tool`, and
   `mcp.shutdown`.
-- Improve tool schemas, argument handling, structured Lua returns, error
-  reporting, and protocol coverage.
+- Improve generic inspection, tool schemas, argument handling, structured Lua
+  returns, error reporting, and protocol coverage.
 - Keep stdout clean for host applications; MCP traffic stays on local IPC or a
   bridge process.
 
@@ -27,7 +42,8 @@ cooperating hosts a small C API for cleaner first-class MCP modes.
 
 ## Host API adapters
 
-- Document patterns for turning host-exposed Lua APIs into explicit MCP tools.
+- Document patterns for turning host-exposed Lua APIs into explicit MCP tools
+  when schemas, policy, or friendlier names are useful.
 - Keep replacement-path examples source-patch-free: relink liblua, use normal
   host Lua loading hooks, and register Lua-visible operations.
 - Keep host-specific semantics in Lua activators or adapters unless they
@@ -41,6 +57,8 @@ cooperating hosts a small C API for cleaner first-class MCP modes.
 
 - Keep bounded runtime inspection useful without dumping secrets or raw process
   internals.
+- Add better summaries for tables, metatables, modules, callable values, and
+  host-shaped objects.
 - Explore safer ways for clients to find live local liblua-mcp sockets.
 - Keep stdio bridging available for MCP clients that do not speak Unix sockets
   directly.
@@ -49,12 +67,16 @@ cooperating hosts a small C API for cleaner first-class MCP modes.
 
 ## Security boundary
 
-- MCP can reach only what the Lua environment can reach and what Lua code
-  explicitly registers.
+- MCP can reach only what the Lua environment can reach. Observe mode is
+  bounded inspection; control mode can invoke Lua-visible functions and methods
+  and must be treated as trusted local control.
+- Explicit `mcp.expose_tool` wrappers remain the preferred way to narrow risky
+  or complex operations into reviewed tool contracts.
 - Process-level launchers, such as the Nmap CLI launcher, must be separately
   gated and labeled because they are not the same boundary as embedded Lua
   state.
-- Treat the project as trusted local alpha software until reviewed otherwise.
+- Treat the project as trusted local alpha software until reviewed otherwise;
+  control mode is powerful even without hazard eval.
 - Keep dangerous tools behind explicit control and hazard gates.
 - Make public docs clear that this is a forked runtime experiment, not an
   upstream Lua proposal or production security claim.

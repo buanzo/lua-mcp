@@ -588,6 +588,393 @@ static void dbuf_lua_json_value (Dbuf *b, lua_State *L, int idx, int depth) {
   }
 }
 
+static const char *skip_json_ws (const char *p) {
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+    p++;
+  return p;
+}
+
+static int is_path_segment_char (char c, int first) {
+  if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')
+    return 1;
+  return !first && c >= '0' && c <= '9';
+}
+
+static int path_segment_valid (const char *segment, size_t len) {
+  size_t i;
+  if (len == 0)
+    return 0;
+  if (!is_path_segment_char(segment[0], 1))
+    return 0;
+  for (i = 1; i < len; i++)
+    if (!is_path_segment_char(segment[i], 0))
+      return 0;
+  return 1;
+}
+
+static int push_path_value (lua_State *L, const char *path, int raw_lookup) {
+  int top = lua_gettop(L);
+  const char *p = path;
+  char segment[256];
+  lua_pushglobaltable(L);
+  if (path == NULL || path[0] == '\0') {
+    lua_settop(L, top);
+    return 0;
+  }
+  while (*p != '\0') {
+    const char *start = p;
+    size_t len;
+    while (*p != '\0' && *p != '.')
+      p++;
+    len = (size_t)(p - start);
+    if (len >= sizeof(segment) || !path_segment_valid(start, len)) {
+      lua_settop(L, top);
+      return 0;
+    }
+    memcpy(segment, start, len);
+    segment[len] = '\0';
+    if (!lua_istable(L, -1)) {
+      lua_settop(L, top);
+      return 0;
+    }
+    if (raw_lookup) {
+      lua_pushlstring(L, segment, len);
+      lua_rawget(L, -2);
+    }
+    else {
+      lua_getfield(L, -1, segment);
+    }
+    lua_remove(L, -2);
+    if (*p == '.') {
+      p++;
+      if (*p == '\0') {
+        lua_settop(L, top);
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static char *json_error_payload (const char *message) {
+  Dbuf b;
+  dbuf_init(&b);
+  dbuf_add(&b, "{\"ok\":false,\"error\":");
+  dbuf_json_string(&b, message, MCP_MAX_TEXT);
+  dbuf_add(&b, "}");
+  if (b.oom) {
+    dbuf_free(&b);
+    return NULL;
+  }
+  return b.data;
+}
+
+static int dbuf_lua_table_shape_json (Dbuf *b, lua_State *L, int idx) {
+  int abs = lua_absindex(L, idx);
+  int count = 0;
+  int need_comma = 0;
+  dbuf_add(b, "[");
+  lua_pushnil(L);
+  while (count < MCP_MAX_ITEMS && lua_next(L, abs) != 0) {
+    if (need_comma)
+      dbuf_add(b, ",");
+    dbuf_add(b, "{\"key_type\":");
+    dbuf_json_string(b, safe_typename(L, -2), 64);
+    if (lua_type(L, -2) == LUA_TSTRING) {
+      dbuf_add(b, ",\"key\":");
+      dbuf_json_string(b, lua_tostring(L, -2), 256);
+    }
+    else if (lua_isnumber(L, -2)) {
+      char number_key[64];
+      snprintf(number_key, sizeof(number_key), "%.14g", (double)lua_tonumber(L, -2));
+      dbuf_add(b, ",\"key\":");
+      dbuf_json_string(b, number_key, sizeof(number_key));
+    }
+    dbuf_add(b, ",\"type\":");
+    dbuf_json_string(b, safe_typename(L, -1), 64);
+    if (lua_isfunction(L, -1))
+      dbuf_add(b, ",\"callable\":true");
+    if (lua_istable(L, -1))
+      dbuf_addf(b, ",\"size\":%llu", (unsigned long long)lua_rawlen(L, -1));
+    dbuf_add(b, "}");
+    need_comma = 1;
+    count++;
+    lua_pop(L, 1);
+  }
+  if (count >= MCP_MAX_ITEMS)
+    lua_pop(L, 1);
+  dbuf_add(b, "]");
+  return count >= MCP_MAX_ITEMS;
+}
+
+static char *value_inspect_json (lua_State *L, const char *line) {
+  char path[512];
+  Dbuf b;
+  lua_Number depth_num;
+  int depth = 2;
+  int top = lua_gettop(L);
+  int type;
+  if (!json_extract_string(line, "path", path, sizeof(path)))
+    return json_error_payload("missing path");
+  if (json_extract_number(line, "depth", &depth_num)) {
+    depth = (int)depth_num;
+    if (depth < 0)
+      depth = 0;
+    if (depth > 6)
+      depth = 6;
+  }
+  if (!push_path_value(L, path, 1))
+    return json_error_payload("path not found or unsupported");
+  type = lua_type(L, -1);
+  dbuf_init(&b);
+  dbuf_add(&b, "{\"ok\":true,\"path\":");
+  dbuf_json_string(&b, path, sizeof(path));
+  dbuf_add(&b, ",\"found\":true,\"type\":");
+  dbuf_json_string(&b, safe_typename(L, -1), 64);
+  if (lua_isfunction(L, -1))
+    dbuf_add(&b, ",\"callable\":true");
+  if (type == LUA_TTABLE) {
+    int shape_truncated;
+    dbuf_add(&b, ",\"shape\":");
+    shape_truncated = dbuf_lua_table_shape_json(&b, L, -1);
+    dbuf_addf(&b, ",\"shape_truncated\":%s", shape_truncated ? "true" : "false");
+    dbuf_add(&b, ",\"value\":");
+    dbuf_lua_json_value(&b, L, -1, depth);
+  }
+  else if (type == LUA_TNIL || type == LUA_TBOOLEAN || type == LUA_TNUMBER ||
+      type == LUA_TSTRING) {
+    dbuf_add(&b, ",\"value\":");
+    dbuf_lua_json_value(&b, L, -1, depth);
+  }
+  dbuf_add(&b, "}");
+  lua_settop(L, top);
+  if (b.oom) {
+    dbuf_free(&b);
+    return NULL;
+  }
+  return b.data;
+}
+
+static int push_json_string_value (lua_State *L, const char **pp) {
+  char out[MCP_MAX_TEXT];
+  const char *p = *pp;
+  size_t len = 0;
+  if (*p != '"')
+    return 0;
+  p++;
+  while (*p != '\0' && *p != '"' && len + 1 < sizeof(out)) {
+    if (*p == '\\' && p[1] != '\0') {
+      p++;
+      switch (*p) {
+        case 'n': out[len++] = '\n'; break;
+        case 'r': out[len++] = '\r'; break;
+        case 't': out[len++] = '\t'; break;
+        case 'b': out[len++] = '\b'; break;
+        case 'f': out[len++] = '\f'; break;
+        default: out[len++] = *p; break;
+      }
+    }
+    else {
+      out[len++] = *p;
+    }
+    p++;
+  }
+  if (*p != '"')
+    return 0;
+  out[len] = '\0';
+  lua_pushlstring(L, out, len);
+  *pp = p + 1;
+  return 1;
+}
+
+static int push_json_argument_value (lua_State *L, const char **pp) {
+  const char *p = skip_json_ws(*pp);
+  char *end = NULL;
+  double number;
+  if (*p == '"') {
+    if (!push_json_string_value(L, &p))
+      return 0;
+    *pp = p;
+    return 1;
+  }
+  if (strncmp(p, "true", 4) == 0) {
+    lua_pushboolean(L, 1);
+    *pp = p + 4;
+    return 1;
+  }
+  if (strncmp(p, "false", 5) == 0) {
+    lua_pushboolean(L, 0);
+    *pp = p + 5;
+    return 1;
+  }
+  if (strncmp(p, "null", 4) == 0) {
+    lua_pushnil(L);
+    *pp = p + 4;
+    return 1;
+  }
+  number = strtod(p, &end);
+  if (end != p) {
+    lua_pushnumber(L, (lua_Number)number);
+    *pp = end;
+    return 1;
+  }
+  return 0;
+}
+
+static int push_json_args_array (lua_State *L, const char *line) {
+  const char *p = json_value_start(line, "args");
+  int count = 0;
+  if (p == NULL)
+    return 0;
+  p = skip_json_ws(p);
+  if (*p != '[')
+    return -1;
+  p++;
+  p = skip_json_ws(p);
+  if (*p == ']')
+    return 0;
+  while (*p != '\0') {
+    if (count >= 16)
+      return -1;
+    if (!push_json_argument_value(L, &p))
+      return -1;
+    count++;
+    p = skip_json_ws(p);
+    if (*p == ',') {
+      p++;
+      continue;
+    }
+    if (*p == ']')
+      return count;
+    return -1;
+  }
+  return -1;
+}
+
+static void dbuf_call_results_json (Dbuf *b, lua_State *L, int start, int count) {
+  int i;
+  dbuf_addf(b, "\"result_count\":%d,\"results\":[", count);
+  for (i = 0; i < count; i++) {
+    if (i > 0)
+      dbuf_add(b, ",");
+    dbuf_lua_json_value(b, L, start + i, 6);
+  }
+  dbuf_add(b, "]");
+  if (count == 1) {
+    dbuf_add(b, ",\"result\":");
+    dbuf_lua_json_value(b, L, start, 6);
+  }
+}
+
+static char *function_call_json (lua_State *L, const char *line) {
+  char path[512];
+  Dbuf b;
+  int nargs;
+  int status;
+  int top = lua_gettop(L);
+  int nresults;
+  if (!json_extract_string(line, "path", path, sizeof(path)) &&
+      !json_extract_string(line, "function", path, sizeof(path)) &&
+      !json_extract_string(line, "target", path, sizeof(path)))
+    return json_error_payload("missing function path");
+  if (!push_path_value(L, path, 0))
+    return json_error_payload("function path not found or unsupported");
+  if (!lua_isfunction(L, -1)) {
+    lua_settop(L, top);
+    return json_error_payload("path is not a function");
+  }
+  nargs = push_json_args_array(L, line);
+  if (nargs < 0) {
+    lua_settop(L, top);
+    return json_error_payload("args must be an array of primitive JSON values");
+  }
+  status = lua_pcall(L, nargs, LUA_MULTRET, 0);
+  dbuf_init(&b);
+  if (status != LUA_OK) {
+    dbuf_add(&b, "{\"ok\":false,\"path\":");
+    dbuf_json_string(&b, path, sizeof(path));
+    dbuf_add(&b, ",\"error\":");
+    dbuf_json_string(&b, lua_tostring(L, -1), MCP_MAX_TEXT);
+    dbuf_add(&b, "}");
+  }
+  else {
+    nresults = lua_gettop(L) - top;
+    dbuf_add(&b, "{\"ok\":true,\"path\":");
+    dbuf_json_string(&b, path, sizeof(path));
+    dbuf_add(&b, ",");
+    dbuf_call_results_json(&b, L, top + 1, nresults);
+    dbuf_add(&b, "}");
+  }
+  lua_settop(L, top);
+  if (b.oom) {
+    dbuf_free(&b);
+    return NULL;
+  }
+  return b.data;
+}
+
+static char *method_call_json (lua_State *L, const char *line) {
+  char receiver[512];
+  char method[256];
+  Dbuf b;
+  int nargs;
+  int status;
+  int top = lua_gettop(L);
+  int nresults;
+  if (!json_extract_string(line, "receiver", receiver, sizeof(receiver)))
+    return json_error_payload("missing receiver path");
+  if (!json_extract_string(line, "member", method, sizeof(method)) &&
+      !json_extract_string(line, "method_name", method, sizeof(method)))
+    return json_error_payload("missing method");
+  if (!path_segment_valid(method, strlen(method)))
+    return json_error_payload("unsupported method name");
+  if (!push_path_value(L, receiver, 0))
+    return json_error_payload("receiver path not found or unsupported");
+  if (!lua_istable(L, -1)) {
+    lua_settop(L, top);
+    return json_error_payload("receiver is not a table");
+  }
+  lua_getfield(L, -1, method);
+  if (!lua_isfunction(L, -1)) {
+    lua_settop(L, top);
+    return json_error_payload("method is not a function");
+  }
+  lua_pushvalue(L, top + 1);
+  nargs = push_json_args_array(L, line);
+  if (nargs < 0) {
+    lua_settop(L, top);
+    return json_error_payload("args must be an array of primitive JSON values");
+  }
+  status = lua_pcall(L, nargs + 1, LUA_MULTRET, 0);
+  dbuf_init(&b);
+  if (status != LUA_OK) {
+    dbuf_add(&b, "{\"ok\":false,\"receiver\":");
+    dbuf_json_string(&b, receiver, sizeof(receiver));
+    dbuf_add(&b, ",\"method\":");
+    dbuf_json_string(&b, method, sizeof(method));
+    dbuf_add(&b, ",\"error\":");
+    dbuf_json_string(&b, lua_tostring(L, -1), MCP_MAX_TEXT);
+    dbuf_add(&b, "}");
+  }
+  else {
+    lua_remove(L, top + 1);
+    nresults = lua_gettop(L) - top;
+    dbuf_add(&b, "{\"ok\":true,\"receiver\":");
+    dbuf_json_string(&b, receiver, sizeof(receiver));
+    dbuf_add(&b, ",\"method\":");
+    dbuf_json_string(&b, method, sizeof(method));
+    dbuf_add(&b, ",");
+    dbuf_call_results_json(&b, L, top + 1, nresults);
+    dbuf_add(&b, "}");
+  }
+  lua_settop(L, top);
+  if (b.oom) {
+    dbuf_free(&b);
+    return NULL;
+  }
+  return b.data;
+}
+
 static int schema_json_is_object (const char *schema) {
   const char *p = schema;
   if (p == NULL)
@@ -644,17 +1031,38 @@ static void add_tool_descriptor (Dbuf *b, const char *name,
   dbuf_add(b, "}");
 }
 
+static void add_builtin_tool_descriptor (Dbuf *b, const char *name,
+    const char *description, const char *schema_json) {
+  dbuf_add(b, "{\"name\":");
+  dbuf_json_string(b, name, 256);
+  dbuf_add(b, ",\"description\":");
+  dbuf_json_string(b, description, MCP_MAX_TEXT);
+  dbuf_add(b, ",\"inputSchema\":");
+  if (schema_json_is_object(schema_json))
+    dbuf_add(b, schema_json);
+  else
+    add_default_input_schema(b);
+  dbuf_add(b, "}");
+}
+
 static char *tools_list_json (lua_State *L) {
   Dbuf b;
   int need_comma = 0;
   dbuf_init(&b);
   dbuf_add(&b, "{\"tools\":[");
-#define ADD_TOOL(n, d) do { if (need_comma) dbuf_add(&b, ","); add_tool_descriptor(&b, (n), (d), NULL, 0); need_comma = 1; } while (0)
+#define ADD_TOOL(n, d) do { if (need_comma) dbuf_add(&b, ","); add_builtin_tool_descriptor(&b, (n), (d), NULL); need_comma = 1; } while (0)
+#define ADD_TOOL_SCHEMA(n, d, s) do { if (need_comma) dbuf_add(&b, ","); add_builtin_tool_descriptor(&b, (n), (d), (s)); need_comma = 1; } while (0)
 #define ADD_EXPOSED_TOOL(n, d, idx) do { if (need_comma) dbuf_add(&b, ","); add_tool_descriptor(&b, (n), (d), L, (idx)); need_comma = 1; } while (0)
   ADD_TOOL("runtime_info", "Return liblua-mcp runtime information.");
   ADD_TOOL("lua_globals_list", "Return a bounded summary of Lua globals.");
   ADD_TOOL("lua_registry_list", "Return a bounded summary of Lua registry keys.");
   ADD_TOOL("lua_stack_snapshot", "Return a bounded Lua stack snapshot.");
+  ADD_TOOL_SCHEMA("lua_value_inspect", "Inspect a Lua-visible value by global path with bounded shape and value data.",
+      "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"depth\":{\"type\":\"number\",\"minimum\":0,\"maximum\":6}},\"required\":[\"path\"],\"additionalProperties\":false}");
+  ADD_TOOL_SCHEMA("lua_function_call", "CONTROL: call a Lua-visible function by global path.",
+      "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"array\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+  ADD_TOOL_SCHEMA("lua_method_call", "CONTROL: call a Lua table method by receiver path and member name.",
+      "{\"type\":\"object\",\"properties\":{\"receiver\":{\"type\":\"string\"},\"member\":{\"type\":\"string\"},\"args\":{\"type\":\"array\"}},\"required\":[\"receiver\",\"member\"],\"additionalProperties\":false}");
   ADD_TOOL("lua_exposed_tools_list", "List Lua functions exposed with mcp.expose_tool.");
   ADD_TOOL("lua_exposed_tool_call", "Call a Lua function exposed with mcp.expose_tool.");
   ADD_TOOL("shutdown", "Stop this liblua-mcp server.");
@@ -675,6 +1083,7 @@ static char *tools_list_json (lua_State *L) {
   lua_pop(L, 1);
   dbuf_add(&b, "]}");
 #undef ADD_TOOL
+#undef ADD_TOOL_SCHEMA
 #undef ADD_EXPOSED_TOOL
   if (b.oom) {
     dbuf_free(&b);
@@ -880,6 +1289,24 @@ static void handle_call (lua_State *L, int fd, const char *id, const char *name,
     payload = registry_json(L);
   else if (strcmp(name, "lua_stack_snapshot") == 0)
     payload = stack_json(L);
+  else if (strcmp(name, "lua_value_inspect") == 0)
+    payload = value_inspect_json(L, line);
+  else if (strcmp(name, "lua_function_call") == 0) {
+    if (mcp_control_enabled())
+      payload = function_call_json(L, line);
+    else {
+      payload = json_error_payload("lua_function_call requires control mode");
+      is_error = 1;
+    }
+  }
+  else if (strcmp(name, "lua_method_call") == 0) {
+    if (mcp_control_enabled())
+      payload = method_call_json(L, line);
+    else {
+      payload = json_error_payload("lua_method_call requires control mode");
+      is_error = 1;
+    }
+  }
   else if (strcmp(name, "lua_exposed_tools_list") == 0)
     payload = exposed_tools_json(L);
   else if (strcmp(name, "lua_exposed_tool_call") == 0) {
