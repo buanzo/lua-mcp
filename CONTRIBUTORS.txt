@@ -9,12 +9,12 @@ Arturo Busleiman aka Buanzo
   Conceived the liblua-mcp direction: improving liblua so embedded Lua hosts
   can expose MCP/listen capabilities to agentic clients without each host
   application implementing MCP directly. Directed the Nmap NSE proof target,
-  MetaMCP integration, hazard-mode safety framing, and
-  liblua-with-mcp.buanzo.org public positioning.
+  MetaMCP integration, hazard-mode safety framing, and the capability-first
+  public positioning for liblua-with-mcp.buanzo.org.
 
 Jadzia / OpenAI Codex
   Implemented the initial liblua-mcp prototype branch, including the built-in
   mcp Lua module, Unix-socket MCP server, stdio bridge, Nmap NSE activator
   example, HAProxy Lua activator example, Lua latest port, bridge regression
-  tests, documentation, validation workflow, and README framing/link updates
-  for the public site.
+  tests, documentation, validation workflow, roadmap, and README/public-site
+  framing updates.

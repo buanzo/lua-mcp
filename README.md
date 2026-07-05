@@ -1,15 +1,16 @@
 # liblua-mcp
 
-An MCP-aware Lua runtime for applications that embed Lua.
+A Lua runtime experiment: liblua itself can expose an opt-in MCP surface.
 
-`liblua-mcp` explores whether embedded Lua hosts can expose local MCP
-observability and controlled agentic interfaces by compiling against an
-MCP-aware `liblua`.
+`liblua-mcp` explores a runtime-level question for people curious about Lua,
+embedded Lua hosts, and Model Context Protocol: can the Lua runtime provide a
+local agent-facing control plane without every host application implementing
+MCP directly?
 
-The primary adoption model is intentional: an application that already embeds
-Lua chooses this liblua at build time. For ABI-compatible hosts, replacing a
-linked liblua can be useful as a lab proof, but that is a compatibility
-footnote rather than the project promise.
+The project center is the capability, not the packaging. The point is what
+becomes possible once this Lua runtime is inside a process: a Lua state can
+offer a local MCP surface. Different hosts get there in different practical
+ways, and those details belong in examples and notes, not in the headline.
 
 This is the canonical latest-development branch of the experiment. It tracks
 upstream Lua `master`, currently reporting Lua 5.5.1 in `lua.h`. Older host
@@ -17,14 +18,16 @@ proofs live on compatibility branches when a host application requires a pinned
 Lua ABI.
 
 `liblua-mcp` is not production-ready. The alpha is meant for trusted local lab
-testing, architecture review, and early feedback from Lua embedders, security
-tooling users, and MCP implementers.
+testing, architecture review, and early feedback from Lua/MCP-curious users,
+Lua embedders, security tooling users, and MCP implementers. It is a forked
+variant for exploration, not an upstream Lua proposal at this stage.
 
 Public site: <https://liblua-with-mcp.buanzo.org/>
 
 ## Project links
 
 - Public site: <https://liblua-with-mcp.buanzo.org/>
+- Roadmap: [`ROADMAP.md`](ROADMAP.md)
 - MetaMCP Tools: <https://github.com/buanzo/metamcp-tools>
 - MCP specification site: <https://modelcontextprotocol.io/>
 
@@ -33,8 +36,7 @@ Public site: <https://liblua-with-mcp.buanzo.org/>
 Many useful applications embed Lua. If MCP support has to be implemented in
 each host application, adoption is slow and uneven. This experiment asks a
 different question: can the Lua runtime itself provide a local, opt-in MCP
-surface so host applications gain agent-facing observability by compiling
-against an MCP-aware `liblua`?
+surface that agents can discover, inspect, and call through bounded tools?
 
 The design goal is not to make Nmap speak MCP on stdout. Nmap output should
 remain normal. The MCP endpoint is local IPC owned by the embedded Lua runtime.
@@ -90,6 +92,18 @@ against the newest Lua source tree. It is the right branch for:
 
 Do not assume every existing Lua host can build against this branch. Many
 applications check `LUA_VERSION_NUM` or vendor a specific Lua ABI.
+
+## Trying it in hosts
+
+The practical path depends on the host and the question being tested:
+
+- build a small embedding test against this fork;
+- use a host that already lets you point at a Lua build;
+- patch a vendored Lua copy when that is how the host carries Lua;
+- use a versioned proof branch when a host depends on an older Lua ABI.
+
+These are ways to put the runtime idea under pressure. They are not the project
+identity.
 
 ## Compatibility proof branches
 
@@ -216,7 +230,7 @@ Open an issue for:
 
 - build failures on specific platforms;
 - Lua latest embedding results;
-- Nmap, HAProxy, mpv, and other host adoption proof results;
+- Nmap, HAProxy, mpv, and other host integration proof results;
 - MCP client compatibility;
 - safety model concerns;
 - ideas for a clean Lua/runtime API boundary.
