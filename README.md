@@ -197,7 +197,7 @@ Then run:
 ```sh
 LUA_MCP_ENABLE=1 LUA_MCP_CONTROL=1 nmap \
   --script /path/to/lua-mcp/examples/nmap/mcp-listen.nse \
-  --script-args 'mcp.socket=/tmp/liblua-mcp/nmap.sock,mcp.mode=control,mcp.timeout=0' \
+  --script-args 'mcp.socket=/tmp/liblua-mcp/nmap.sock,mcp.mode=control,mcp.timeout=0,mcp.nmap_bin=/path/to/nmap' \
   -sn 127.0.0.1
 ```
 
@@ -215,13 +215,23 @@ The Nmap adapter registers tools such as:
 - `nmap_run_script`
 
 `nmap_cli_scan` and `nmap_run_script` are intentionally separate from the
-embedded NSE context. They spawn a normal `nmap` subprocess for agent requests
+embedded NSE context. They spawn a local `nmap` subprocess for agent requests
 such as "run a port scan" or "run this NSE script", and they are disabled
 unless this explicit local-lab gate is set:
 
 ```sh
 LUA_MCP_NMAP_CLI=1
 ```
+
+The executable is auditable. The adapter chooses it in this order:
+
+1. Per-call MCP argument: `nmap_bin`
+2. NSE script argument: `mcp.nmap_bin`
+3. Environment: `LUA_MCP_NMAP_BIN`
+4. Fallback: `nmap` from `PATH`
+
+Use `mcp.nmap_bin` or `LUA_MCP_NMAP_BIN` when the MCP listener is running from
+a custom Nmap build and agent-triggered scans must use that exact binary.
 
 A real `nmap --mcp` mode would be cleaner than this launcher because Nmap could
 own the lifecycle directly: initialize NSE Lua, register scan/script tools, call

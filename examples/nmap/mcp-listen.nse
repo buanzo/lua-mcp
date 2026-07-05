@@ -25,13 +25,15 @@ lab sessions.
 -- @usage
 -- LUA_MCP_ENABLE=1 LUA_MCP_CONTROL=1 nmap \
 --   --script /path/to/lua-mcp/examples/nmap/mcp-listen.nse \
---   --script-args 'mcp.socket=/run/user/1000/liblua-mcp/nmap.sock,mcp.mode=control,mcp.timeout=0' \
+--   --script-args 'mcp.socket=/run/user/1000/liblua-mcp/nmap.sock,mcp.mode=control,mcp.timeout=0,mcp.nmap_bin=/path/to/nmap' \
 --   127.0.0.1
 --
 -- @args mcp.socket Unix socket path for the liblua-mcp endpoint.
 -- @args mcp.mode observe, control, or hazard. Defaults to observe.
 -- @args mcp.timeout Number of seconds to listen. Zero means until shutdown.
 -- @args mcp.id Optional logical endpoint identifier.
+-- @args mcp.nmap_bin Optional Nmap executable used by nmap_cli_scan and
+--   nmap_run_script. Defaults to LUA_MCP_NMAP_BIN, then nmap from PATH.
 --
 -- @output
 -- Pre-scan script results:
@@ -60,6 +62,7 @@ local cli_scan_schema = {
     target = {type = "string", description = "Single target, hostname, address, or CIDR."},
     ports = {type = "string", description = "Optional Nmap -p value."},
     scripts = {type = "string", description = "Optional Nmap --script expression."},
+    nmap_bin = {type = "string", description = "Optional Nmap executable path or command name."},
     scan = {type = "string", enum = {"connect", "syn", "ping"}},
     timeout = {type = "number", description = "Host timeout in seconds, 1-600."},
     output_limit = {type = "number", description = "Maximum output characters, 1000-32000."},
@@ -74,6 +77,7 @@ local run_script_schema = {
     target = {type = "string", description = "Single target, hostname, address, or CIDR."},
     script = {type = "string", description = "NSE script name or safe script expression."},
     ports = {type = "string", description = "Optional Nmap -p value."},
+    nmap_bin = {type = "string", description = "Optional Nmap executable path or command name."},
     timeout = {type = "number", description = "Host timeout in seconds, 1-600."},
     output_limit = {type = "number", description = "Maximum output characters, 1000-32000."},
   },
@@ -106,6 +110,25 @@ local function arg_number(request, key, fallback)
     end
   end
   return fallback
+end
+
+local function configured_nmap_bin(request)
+  local nmap_bin = ""
+  if request ~= nil then
+    nmap_bin = arg_string(request, "nmap_bin", "")
+  end
+  if nmap_bin ~= "" then
+    return nmap_bin, "request"
+  end
+  nmap_bin = stdnse.get_script_args("mcp.nmap_bin") or ""
+  if nmap_bin ~= "" then
+    return nmap_bin, "script_arg"
+  end
+  nmap_bin = getenv("LUA_MCP_NMAP_BIN") or ""
+  if nmap_bin ~= "" then
+    return nmap_bin, "env"
+  end
+  return "nmap", "path"
 end
 
 local function bounded_number(value, fallback, low, high)
@@ -157,12 +180,15 @@ local function table_shape(t)
 end
 
 local function tool_nmap_mcp_info()
+  local nmap_bin, nmap_bin_source = configured_nmap_bin()
   return {
     ok = true,
     adapter = "nmap-nse",
     have_nmap = have_nmap,
     have_mcp = have_mcp,
     lua_mcp_nmap_cli = getenv("LUA_MCP_NMAP_CLI") == "1",
+    nmap_bin = nmap_bin,
+    nmap_bin_source = nmap_bin_source,
     nmap_type = type(nmap),
     stdnse_type = type(stdnse),
   }
@@ -206,6 +232,7 @@ local function tool_nmap_script_args()
     "mcp.mode",
     "mcp.timeout",
     "mcp.id",
+    "mcp.nmap_bin",
   }
   local args = {}
   for _, name in ipairs(names) do
@@ -282,6 +309,8 @@ local function run_cli_scan(request, force_script)
   local target = arg_string(request, "target", "")
   local ports = arg_string(request, "ports", "")
   local scripts = force_script and arg_string(request, "script", "") or arg_string(request, "scripts", "")
+  local nmap_bin
+  local nmap_bin_source
   local scan = arg_string(request, "scan", "connect")
   local timeout = bounded_number(arg_number(request, "timeout", 60), 60, 1, 600)
   local output_limit = bounded_number(arg_number(request, "output_limit", DEFAULT_OUTPUT_LIMIT),
@@ -291,7 +320,7 @@ local function run_cli_scan(request, force_script)
     syn = "-sS",
     ping = "-sn",
   }
-  local argv = {"nmap", "-oN", "-", "--host-timeout", tostring(timeout) .. "s", "--max-retries", "2"}
+  local argv
   local command
   local pipe
   local output
@@ -324,6 +353,13 @@ local function run_cli_scan(request, force_script)
       error = "target is required",
     }
   end
+  nmap_bin, nmap_bin_source = configured_nmap_bin(request)
+  if not safe_value(nmap_bin, "^[%w%._%-%/]+$", 512) then
+    return {
+      ok = false,
+      error = "nmap_bin contains unsupported characters",
+    }
+  end
   if not safe_value(ports, "^[%w,%-%s:]+$", 128) then
     return {
       ok = false,
@@ -342,6 +378,7 @@ local function run_cli_scan(request, force_script)
       error = "script expression contains unsupported characters",
     }
   end
+  argv = {nmap_bin, "-oN", "-", "--host-timeout", tostring(timeout) .. "s", "--max-retries", "2"}
   argv[#argv + 1] = scan_flags[scan] or scan_flags.connect
   if ports ~= "" then
     argv[#argv + 1] = "-p"
@@ -379,6 +416,8 @@ local function run_cli_scan(request, force_script)
     why = why,
     code = code,
     command = command,
+    nmap_bin = nmap_bin,
+    nmap_bin_source = nmap_bin_source,
     output = output,
     truncated = truncated,
   }

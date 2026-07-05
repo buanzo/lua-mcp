@@ -17,5 +17,6 @@ Jadzia / OpenAI Codex
   mcp Lua module, Unix-socket MCP server, stdio bridge, Nmap NSE activator
   example, HAProxy Lua activator example, Lua latest port, bridge regression
   tests, host-cooperative C API, schema-aware exposed tools, Nmap NSE adapter
-  tools, documentation, validation workflow, roadmap, and README/public-site
-  framing updates.
+  tools, explicit Nmap binary selection for agent-triggered scans,
+  documentation, validation workflow, roadmap, and README/public-site framing
+  updates.
