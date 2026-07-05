@@ -29,6 +29,7 @@ Public site: <https://liblua-with-mcp.buanzo.org/>
 ## Project links
 
 - Public site: <https://liblua-with-mcp.buanzo.org/>
+- White paper: [`WHITEPAPER.md`](WHITEPAPER.md)
 - Roadmap: [`ROADMAP.md`](ROADMAP.md)
 - MetaMCP Tools: <https://github.com/buanzo/metamcp-tools>
 - MCP specification site: <https://modelcontextprotocol.io/>
