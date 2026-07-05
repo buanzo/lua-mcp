@@ -1,16 +1,18 @@
 # liblua-mcp
 
-A Lua runtime experiment: liblua itself can expose an opt-in MCP surface.
+Lua as an MCP control layer for software that embeds Lua.
 
-`liblua-mcp` explores a runtime-level question for people curious about Lua,
-embedded Lua hosts, and Model Context Protocol: can the Lua runtime provide a
-local agent-facing control plane without every host application implementing
-MCP directly?
+`liblua-mcp` is a Lua fork that adds a built-in `mcp` library. Many
+applications already embed Lua and expose host behavior to Lua scripts:
+commands, state, callbacks, plugin APIs, or domain-specific objects.
+`liblua-mcp` lets that Lua scripting surface publish selected capabilities as
+local MCP tools.
 
-The project center is the capability, not the packaging. The point is what
-becomes possible once this Lua runtime is inside a process: a Lua state can
-offer a local MCP surface. Different hosts get there in different practical
-ways, and those details belong in examples and notes, not in the headline.
+The host application does not need to speak MCP. MCP clients do not get
+unrestricted access to the whole process. They can inspect bounded Lua runtime
+state and call only the tools that Lua code explicitly exposes with
+`mcp.expose_tool`, subject to the enable, control, and hazard gates documented
+below.
 
 This is the canonical latest-development branch of the experiment. It tracks
 upstream Lua `master`, currently reporting Lua 5.5.1 in `lua.h`. Older host
@@ -33,15 +35,21 @@ Public site: <https://liblua-with-mcp.buanzo.org/>
 
 ## Why this exists
 
-Many useful applications embed Lua. If MCP support has to be implemented in
-each host application, adoption is slow and uneven. This experiment asks a
-different question: can the Lua runtime itself provide a local, opt-in MCP
-surface that agents can discover, inspect, and call through bounded tools?
+Lua is often where users and operators automate software that was written in
+another language. A host embeds Lua, exposes useful host APIs to scripts, and
+lets users extend behavior without changing the host source tree.
 
-The design goal is not to make Nmap speak MCP on stdout. Nmap output should
-remain normal. The MCP endpoint is local IPC owned by the embedded Lua runtime.
+`liblua-mcp` asks what happens when that existing Lua scripting surface can
+also speak MCP. A Lua script can start a local listener, register wrappers
+around host APIs, and make those wrappers available to MCP clients. Nmap,
+HAProxy, and mpv are proof targets because they already show different styles
+of host capability exposed through Lua.
 
-## Current alpha surface
+The design goal is not to make Nmap, HAProxy, mpv, or any other host speak MCP
+on stdout. Host output should remain normal. MCP runs through local IPC owned by
+the Lua side.
+
+## The `mcp` library
 
 This branch adds a built-in Lua module named `mcp`, loaded by
 `luaL_openlibs()`.
@@ -61,6 +69,18 @@ python3 tools/lua_mcp_stdio_bridge.py --socket /tmp/liblua-mcp/nmap.sock
 
 The bridge is suitable for MCP clients that speak stdio, including Codex,
 Claude Desktop, and [MetaMCP Tools](https://github.com/buanzo/metamcp-tools).
+
+Lua-facing functions in the current alpha:
+
+- `mcp.available()`: true when `LUA_MCP_ENABLE=1` enables the library.
+- `mcp.serve(opts)` / `mcp.listen(opts)`: start a local MCP listener.
+- `mcp.expose_tool(name, schema, fn, opts)`: register a Lua function as an MCP
+  tool in control mode.
+- `mcp.shutdown()`: request listener shutdown.
+
+Built-in MCP tools include bounded runtime information, global names, registry
+shape, stack shape, exposed-tool listing, exposed-tool calls, and explicit
+hazard tools when the hazard gate is set.
 
 ## Build quickstart
 
@@ -93,17 +113,21 @@ against the newest Lua source tree. It is the right branch for:
 Do not assume every existing Lua host can build against this branch. Many
 applications check `LUA_VERSION_NUM` or vendor a specific Lua ABI.
 
-## Trying it in hosts
+## Host examples
 
-The practical path depends on the host and the question being tested:
+The examples are Lua adapters from host APIs to MCP tools. Each host decides
+what Lua can see; `liblua-mcp` makes selected Lua-visible capabilities callable
+over local MCP.
 
-- build a small embedding test against this fork;
-- use a host that already lets you point at a Lua build;
-- patch a vendored Lua copy when that is how the host carries Lua;
-- use a versioned proof branch when a host depends on an older Lua ABI.
+- Nmap NSE: the activator starts a local listener from NSE Lua and can expose
+  NSE-oriented state.
+- HAProxy: a normal `lua-load` script registers HAProxy `core` wrappers such as
+  proxy and server stats.
+- mpv: the Lua 5.1 proof exposes player state and playback controls through
+  mpv's Lua API.
 
-These are ways to put the runtime idea under pressure. They are not the project
-identity.
+These examples are not host-specific MCP implementations. They are Lua scripts
+using the same built-in `mcp` library.
 
 ## Compatibility proof branches
 
